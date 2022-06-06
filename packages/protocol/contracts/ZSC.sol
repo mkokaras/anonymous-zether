@@ -21,6 +21,11 @@ contract ZSC {
     uint256 constant MAX = 4294967295; // 2^32 - 1 // no sload for constants...!
     mapping(bytes32 => Utils.G1Point[2]) acc; // main account mapping
     mapping(bytes32 => Utils.G1Point[2]) pending; // storage for pending transfers
+
+    mapping(bytes32 => address) locked; // account locking mapping
+    mapping(bytes32 => address) pLocked; // storage for pending lock/unlock
+
+
     mapping(bytes32 => uint256) lastRollOver;
     bytes32[] nonceSet; // would be more natural to use a mapping, but they can't be deleted / reset!
     uint256 lastGlobalUpdate = 0; // will be also used as a proxy for "current epoch", seeing as rollovers will be anticipated
@@ -48,7 +53,7 @@ contract ZSC {
         for (uint256 i = 0; i < size; i++) {
             bytes32 yHash = keccak256(abi.encode(y[i]));
             accounts[i] = acc[yHash];
-            if (lastRollOver[yHash] < epoch) {
+            if (lastRollOver[yHash] < epoch && locked[yHash] == address(this)) {
                 Utils.G1Point[2] memory scratch = pending[yHash];
                 accounts[i][0] = accounts[i][0].add(scratch[0]);
                 accounts[i][1] = accounts[i][1].add(scratch[1]);
@@ -61,7 +66,10 @@ contract ZSC {
         if (lastRollOver[yHash] < e) {
             Utils.G1Point[2][2] memory scratch = [acc[yHash], pending[yHash]];
             acc[yHash][0] = scratch[0][0].add(scratch[1][0]);
+
             acc[yHash][1] = scratch[0][1].add(scratch[1][1]);
+
+            locked[yHash] = pLocked[yHash];
             // acc[yHash] = scratch[0]; // can't do this---have to do the above instead (and spend 2 sloads / stores)---because "not supported". revisit
             delete pending[yHash]; // pending[yHash] = [Utils.G1Point(0, 0), Utils.G1Point(0, 0)];
             lastRollOver[yHash] = e;
@@ -87,13 +95,22 @@ contract ZSC {
         require(!registered(yHash), "Account already registered!");
         // pending[yHash] = [y, Utils.g()]; // "not supported" yet, have to do the below
         pending[yHash][0] = y;
+
         pending[yHash][1] = Utils.g();
+
+        
+        pLocked[yHash] = address(this);
+
+        locked[yHash] = address(this);
     }
 
     function fund(Utils.G1Point memory y, uint256 bTransfer) public {
         bytes32 yHash = keccak256(abi.encode(y));
         require(registered(yHash), "Account not yet registered.");
         rollOver(yHash);
+
+        require(checkLock(yHash,msg.sender),"Account is locked");
+
 
         require(bTransfer <= MAX, "Deposit amount out of range."); // uint, so other way not necessary?
 
@@ -113,12 +130,16 @@ contract ZSC {
         bytes32 beneficiaryHash = keccak256(abi.encode(beneficiary));
         require(registered(beneficiaryHash), "Miner's account is not yet registered."); // necessary so that receiving a fee can't "backdoor" you into registration.
         rollOver(beneficiaryHash);
+
+        require(checkLock(beneficiaryHash,msg.sender),"You are not allowed to operate");
+
         pending[beneficiaryHash][0] = pending[beneficiaryHash][0].add(Utils.g().mul(fee));
 
         for (uint256 i = 0; i < size; i++) {
             bytes32 yHash = keccak256(abi.encode(y[i]));
             require(registered(yHash), "Account not yet registered.");
             rollOver(yHash);
+            require(checkLock(yHash,msg.sender),"You are not allowed to operate");
             Utils.G1Point[2] memory scratch = pending[yHash];
             pending[yHash][0] = scratch[0].add(C[i]);
             pending[yHash][1] = scratch[1].add(D);
@@ -145,6 +166,8 @@ contract ZSC {
         require(registered(yHash), "Account not yet registered.");
         rollOver(yHash);
 
+        require(checkLock(yHash,msg.sender),"You are not allowed to operate");
+
         require(0 <= bTransfer && bTransfer <= MAX, "Transfer amount out of range.");
         Utils.G1Point[2] memory scratch = pending[yHash];
         pending[yHash][0] = scratch[0].add(Utils.g().mul(bTransfer.neg()));
@@ -159,5 +182,46 @@ contract ZSC {
 
         require(burnVerifier.verifyBurn(scratch[0], scratch[1], y, lastGlobalUpdate, u, msg.sender, proof), "Burn proof verification failed!");
         require(coin.transfer(msg.sender, bTransfer), "This shouldn't fail... Something went severely wrong.");
+    }
+
+    function lock(address addr,Utils.G1Point memory y,uint256 c, uint256 s,Utils.G1Point memory gepoch) public {
+
+        bytes32 yHash = keccak256(abi.encode(y));
+
+        require(registered(yHash), "Account not yet registered.");
+
+        rollOver(yHash);
+
+        require(checkLock(yHash,msg.sender),"You are not allowed to operate");
+
+        Utils.G1Point memory K = Utils.g().mul(s).add(y.mul(c.neg()));
+
+        uint256 challenge = uint256(keccak256(abi.encode(addr, y, K,gepoch))).mod();
+
+        require(challenge == c, "Invalid locking signature");
+
+        pLocked[yHash] = addr;
+    }
+
+    function unlock(Utils.G1Point memory y) public {
+        bytes32 yHash = keccak256(abi.encode(y));
+
+        require(registered(yHash), "Account not yet registered.");
+
+        rollOver(yHash);
+
+        require(checkLock(yHash,msg.sender),"You are not allowed to operate");
+
+        pLocked[yHash] = address(this);
+    }
+
+    function checkLock(bytes32 yHash,address addr) internal returns(bool){
+
+        if(locked[yHash] == address(this) || locked[yHash] == addr){
+            return true;
+        }
+        else{
+            return false;
+        }
     }
 }
