@@ -33,7 +33,7 @@ contract("ZSC", async (accounts) => {
   });
 
   it("should allow unlocking", async () => {
-    await alice.unlock(accounts[0]);
+    await alice.unlock();
   });
 
   it("should allow transferring", async () => {
